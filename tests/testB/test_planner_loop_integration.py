@@ -117,6 +117,26 @@ class PlannerLoopIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(executor_failed.runtime_state.failure_reason, FAILURE_EXECUTOR_FAILED)
 
+    def test_open_chat_strict_check_accepts_chat_surface_when_title_ocr_is_missing(self):
+        planner = MiniPlanner()
+        task = {
+            "goal": "open_chat",
+            "params": {"target_name": "\u6d4b\u8bd5\u7fa4"},
+            "steps": [
+                {"action_hint": "find_chat", "target_text": "\u6d4b\u8bd5\u7fa4"},
+            ],
+        }
+
+        result = planner.run_once(
+            task,
+            lambda: ui_state("\u6d4b\u8bd5\u7fa4"),
+            success_executor,
+            create_runtime_state(task),
+            get_after_ui_state=lambda: ui_state("\u65b0\u6d88\u606f"),
+        )
+
+        self.assertEqual(result.runtime_state.status, RuntimeStatus.SUCCESS.value)
+
     def test_five_single_step_scenarios_drive_planner_loop(self):
         planner = MiniPlanner()
 

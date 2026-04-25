@@ -379,9 +379,9 @@ def _step_succeeded(
             return True, ""
         if task.goal == GOAL_OPEN_CHAT:
             matched_text = _decision_matched_text(decision)
-            if _is_meaningful_partial_match(matched_text, target_text) and _contains_text(
-                after_ui_state,
-                matched_text,
+            if _is_meaningful_partial_match(matched_text, target_text) and (
+                _contains_text(after_ui_state, matched_text)
+                or _looks_like_open_chat(after_ui_state)
             ):
                 return True, ""
         return False, f"after page does not contain target_text: {target_text}"
@@ -403,6 +403,17 @@ def _contains_any_text(ui_state: Mapping[str, Any], targets: tuple[str, ...]) ->
     return any(_contains_text(ui_state, target) for target in targets)
 
 
+def _looks_like_open_chat(ui_state: Mapping[str, Any]) -> bool:
+    chat_surface_markers = (
+        "\u53d1\u9001\u7ed9",
+        "\u65b0\u6d88\u606f",
+        "\u9080\u8bf7",
+        "\u52a0\u5165\u6b64\u7fa4",
+        "\u64a4\u56de\u4e86\u4e00\u6761\u6d88\u606f",
+    )
+    return _contains_any_text(ui_state, chat_surface_markers)
+
+
 def _contains_text(ui_state: Mapping[str, Any], target_text: Any) -> bool:
     if target_text is None:
         return False
@@ -413,7 +424,46 @@ def _contains_text(ui_state: Mapping[str, Any], target_text: Any) -> bool:
         haystack = text.casefold()
         if needle in haystack:
             return True
+        if _ocr_tolerant_text_match(text, target_text):
+            return True
     return False
+
+
+def _ocr_tolerant_text_match(text: Any, target_text: Any) -> bool:
+    candidate = _normalize_match_text(text)
+    target = _normalize_match_text(target_text)
+    if not candidate or not target:
+        return False
+    if candidate == target or target in candidate:
+        return True
+    if candidate in target:
+        return (
+            _is_meaningful_partial_match(candidate, target)
+            and len(candidate) / len(target) >= 0.75
+        )
+
+    # OCR can drop or substitute one Chinese character in short search terms
+    # such as "项目周报" -> "项目报". Keep this conservative so one-character
+    # fragments and unrelated short labels do not pass business validation.
+    if len(target) < 4 or len(candidate) < 3:
+        return False
+    common = _longest_common_subsequence_length(candidate, target)
+    return common >= len(target) - 1 and len(candidate) >= len(target) - 1
+
+
+def _longest_common_subsequence_length(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_char in left:
+        current = [0]
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
 
 
 def _visible_texts(ui_state: Mapping[str, Any]) -> list[str]:

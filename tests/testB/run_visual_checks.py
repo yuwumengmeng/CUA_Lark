@@ -36,8 +36,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from planner.action_protocol import ACTION_DECISION_VERSION, action_decision_to_executor_payload
-from planner.mini_planner import (
+from planner.action_protocol import ACTION_DECISION_VERSION, action_decision_to_executor_payload  # noqa: E402
+from planner.mini_planner import (  # noqa: E402
     ACTION_CLICK,
     ACTION_HOTKEY,
     ACTION_TYPE,
@@ -47,9 +47,9 @@ from planner.mini_planner import (
     FAILURE_TARGET_NOT_FOUND,
     MiniPlanner,
 )
-from planner.runtime_state import RuntimeStateError, RuntimeStatus, create_runtime_state
-from planner.task_schema import parse_task
-from planner.workflow_schema import (
+from planner.runtime_state import RuntimeStateError, RuntimeStatus, create_runtime_state  # noqa: E402
+from planner.task_schema import parse_task  # noqa: E402
+from planner.workflow_schema import (  # noqa: E402
     STEP_VERIFY_MESSAGE_SENT,
     build_im_message_workflow,
     build_sample_im_workflows,

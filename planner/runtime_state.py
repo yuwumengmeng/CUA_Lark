@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
-from .task_schema import TaskSchemaError, TaskSpec, parse_task
+from .task_schema import TaskSpec, parse_task
 
 
 RUNTIME_STATE_SCHEMA_VERSION = "runtime_state.v1"

@@ -33,6 +33,7 @@ from planner.mini_planner import (
     ACTION_WAIT,
     DECISION_FAILED,
     FAILURE_EXECUTOR_FAILED,
+    FAILURE_PAGE_MISMATCH,
     FAILURE_TARGET_NOT_FOUND,
     MiniPlanner,
 )
@@ -92,6 +93,46 @@ class MiniPlannerTests(unittest.TestCase):
         self.assertEqual(second.decision["text"], "项目周报")
         self.assertEqual(state.status, RuntimeStatus.SUCCESS.value)
         self.assertEqual(state.step_idx, 2)
+
+    def test_strict_type_text_accepts_ocr_dropped_character(self):
+        planner = MiniPlanner()
+        search_text = "\u9879\u76ee\u5468\u62a5"
+        task = {
+            "goal": "input_search",
+            "steps": [{"action_hint": "type_text", "input_text": search_text}],
+        }
+        state = create_runtime_state(task)
+
+        result = planner.run_once(
+            task,
+            lambda: fake_text_ui_state(""),
+            fake_success_executor,
+            state,
+            get_after_ui_state=lambda: fake_text_ui_state("\u9879\u76ee\u62a5"),
+        )
+
+        self.assertEqual(result.runtime_state.status, RuntimeStatus.SUCCESS.value)
+        self.assertEqual(result.runtime_state.step_idx, 1)
+
+    def test_strict_type_text_rejects_short_ocr_fragment(self):
+        planner = MiniPlanner()
+        search_text = "\u9879\u76ee\u5468\u62a5"
+        task = {
+            "goal": "input_search",
+            "steps": [{"action_hint": "type_text", "input_text": search_text}],
+        }
+        state = create_runtime_state(task)
+
+        result = planner.run_once(
+            task,
+            lambda: fake_text_ui_state(""),
+            fake_success_executor,
+            state,
+            get_after_ui_state=lambda: fake_text_ui_state("\u9879\u76ee"),
+        )
+
+        self.assertEqual(result.runtime_state.status, RuntimeStatus.FAILED.value)
+        self.assertEqual(result.runtime_state.failure_reason, FAILURE_PAGE_MISMATCH)
 
     def test_back_task_outputs_hotkey_action(self):
         planner = MiniPlanner()
@@ -449,6 +490,34 @@ def text_match_with_chat_row_suffix_state() -> dict:
     state["page_summary"]["top_texts"].append("测试")
     state["page_summary"]["candidate_count"] = len(state["candidates"])
     return state
+
+
+def fake_text_ui_state(text: str) -> dict:
+    candidates = []
+    if text:
+        candidates.append(
+            {
+                "id": "elem_text",
+                "text": text,
+                "bbox": [10, 10, 120, 40],
+                "center": [65, 25],
+                "role": "text",
+                "clickable": False,
+                "editable": False,
+                "source": "ocr",
+                "confidence": 0.9,
+            }
+        )
+    return {
+        "screenshot_path": "artifacts/runs/run_test/screenshots/step_001_before.png",
+        "candidates": candidates,
+        "page_summary": {
+            "top_texts": [text] if text else [],
+            "has_search_box": True,
+            "has_modal": False,
+            "candidate_count": len(candidates),
+        },
+    }
 
 
 def fake_success_executor(action: dict) -> dict:

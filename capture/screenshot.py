@@ -195,6 +195,7 @@ class MssScreenshotBackend:
     ) -> CapturedImage:
         import mss
 
+        _ensure_process_dpi_aware()
         hwnd, _, bounds = _find_window(window_title)
         if focus_window or maximize_window:
             _activate_window(
@@ -440,6 +441,7 @@ def _find_window_bounds(window_title: str) -> ScreenBounds:
 
 
 def _find_window(window_title: str) -> tuple[int, str, ScreenBounds]:
+    _ensure_process_dpi_aware()
     try:
         import win32gui
     except ImportError as exc:
@@ -468,6 +470,7 @@ def _find_window(window_title: str) -> tuple[int, str, ScreenBounds]:
 
 
 def _window_bounds(hwnd: int) -> ScreenBounds:
+    _ensure_process_dpi_aware()
     try:
         import win32gui
     except ImportError as exc:
@@ -482,6 +485,24 @@ def _window_bounds(hwnd: int) -> ScreenBounds:
         width=int(right - left),
         height=int(bottom - top),
     )
+
+
+_DPI_AWARENESS_ATTEMPTED = False
+
+
+def _ensure_process_dpi_aware() -> None:
+    """Keep Win32 window bounds in the same physical coordinate space as mss."""
+    global _DPI_AWARENESS_ATTEMPTED
+    if _DPI_AWARENESS_ATTEMPTED:
+        return
+    _DPI_AWARENESS_ATTEMPTED = True
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        # Non-Windows platforms and already-configured processes can safely continue.
+        return
 
 
 def _activate_window(
