@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# IDE / editor
+.vscode/
+.DS_Store
+
+# Runtime generated artifacts
+artifacts/runs/*
+!artifacts/runs/.gitkeep
+
+# Temporary artifacts
+artifacts/tmp/
+artifacts/cache/
+
+# Runtime logs
+*.log
+*.jsonl
