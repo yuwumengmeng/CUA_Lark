@@ -14,12 +14,21 @@ from .base_executor import (
     execute_action,
     resolve_action_point,
 )
+from .action_runner import ExecutorWithRecorder, StepExecutionResult, run_step
+from .recorder import RunArtifactPaths, RunRecorder, RunRecorderError
+
 __all__ = [
     "ActionDecisionError",
     "BaseExecutor",
     "DesktopActionBackend",
+    "ExecutorWithRecorder",
     "ExecutorConfig",
     "PyAutoGUIDesktopBackend",
+    "RunArtifactPaths",
+    "RunRecorder",
+    "RunRecorderError",
+    "StepExecutionResult",
     "execute_action",
     "resolve_action_point",
+    "run_step",
 ]
