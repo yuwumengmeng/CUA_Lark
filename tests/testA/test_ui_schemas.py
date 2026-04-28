@@ -36,6 +36,8 @@ SOURCE_OCR = schemas_module.SOURCE_OCR
 UICandidate = schemas_module.UICandidate
 UIState = schemas_module.UIState
 PageSummary = schemas_module.PageSummary
+PageSemantics = schemas_module.PageSemantics
+ScreenMeta = schemas_module.ScreenMeta
 UISchemaError = schemas_module.UISchemaError
 bbox_center = schemas_module.bbox_center
 candidate_from_ocr = schemas_module.candidate_from_ocr
@@ -43,6 +45,8 @@ candidate_from_uia = schemas_module.candidate_from_uia
 offset_bbox = schemas_module.offset_bbox
 resolve_click_point = schemas_module.resolve_click_point
 save_ui_state_json = schemas_module.save_ui_state_json
+save_screen_meta_json = schemas_module.save_screen_meta_json
+screen_meta_artifact_path = schemas_module.screen_meta_artifact_path
 ui_state_artifact_path = schemas_module.ui_state_artifact_path
 
 
@@ -155,6 +159,69 @@ class UISchemaTests(unittest.TestCase):
         self.assertEqual(set(ui_state.to_dict().keys()), {"screenshot_path", "candidates", "page_summary"})
         self.assertEqual(restored.candidates[1].text, "测试群")
 
+    def test_page_summary_can_carry_generic_semantics(self):
+        semantics = PageSemantics(
+            domain="im",
+            view="detail",
+            summary="Conversation page with input available",
+            state_tags=["detail_open", "input_ready"],
+            signals={"detail_open": True, "input_available": True, "target_active": True},
+            entities=[{
+                "type": "conversation",
+                "name": "测试群",
+                "visible": True,
+                "matched_target": True,
+                "confidence": 0.91,
+            }],
+            goal_progress="achieved",
+            confidence=0.9,
+        )
+        summary = PageSummary(candidate_count=1).with_semantic_summary(semantics)
+        payload = summary.to_dict()
+        restored = PageSummary.from_dict(payload)
+
+        self.assertIn("semantic_summary", payload)
+        self.assertEqual(restored.semantic_summary.domain, "im")
+        self.assertTrue(restored.semantic_summary.signals["target_active"])
+        self.assertEqual(restored.semantic_summary.entities[0]["type"], "conversation")
+
+    def test_screen_meta_roundtrip_and_ui_state_output(self):
+        candidate = UICandidate(
+            id="elem_001",
+            text="搜索",
+            bbox=[4010, -10, 4050, 20],
+            source=SOURCE_OCR,
+            confidence=0.9,
+        )
+        screen_meta = ScreenMeta(
+            screenshot_size=[120, 80],
+            screen_resolution=[2560, 1440],
+            window_rect=[4000, -20, 4120, 60],
+            screen_origin=[4000, -20],
+            capture_target="window",
+            monitor_index=1,
+            monitor_count=2,
+            is_multi_monitor=True,
+            dpi_scale=1.25,
+            candidate_coordinate_source_counts={"ocr": 1},
+            negative_coordinate_candidate_count=1,
+            out_of_screenshot_candidate_count=0,
+        )
+        ui_state = UIState(
+            screenshot_path="screenshots/step_001_before.png",
+            candidates=[candidate],
+            page_summary=PageSummary.from_candidates([candidate]),
+            screen_meta=screen_meta,
+        )
+
+        payload = ui_state.to_dict()
+        restored = UIState.from_dict(payload)
+
+        self.assertIn("screen_meta", payload)
+        self.assertEqual(payload["screen_meta"]["screenshot_size"], [120, 80])
+        self.assertEqual(restored.screen_meta.screen_resolution, [2560, 1440])
+        self.assertTrue(restored.screen_meta.is_multi_monitor)
+
     def test_page_summary_detects_search_box_from_ctrl_k_tokens(self):
         candidates = [
             UICandidate(id="elem_001", text="(Ctrl", bbox=[10, 20, 50, 40], confidence=0.9),
@@ -207,6 +274,35 @@ class UISchemaTests(unittest.TestCase):
             self.assertEqual(saved_path.name, "ui_state_step_001_before.json")
             payload = json.loads(saved_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["candidates"][0]["center"], [30, 30])
+
+    def test_screen_meta_artifact_path_and_save_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            screen_meta = ScreenMeta(
+                screenshot_size=[120, 80],
+                screen_resolution=[120, 80],
+                window_rect=None,
+                screen_origin=[0, 0],
+                candidate_coordinate_source_counts={"ocr": 1},
+            )
+
+            expected_path = screen_meta_artifact_path(
+                run_id="run_demo",
+                step_idx=1,
+                phase="before",
+                artifact_root=temp_dir,
+            )
+            saved_path = save_screen_meta_json(
+                screen_meta,
+                run_id="run_demo",
+                step_idx=1,
+                phase="before",
+                artifact_root=temp_dir,
+            )
+
+            self.assertEqual(saved_path, expected_path)
+            self.assertEqual(saved_path.name, "screen_meta_step_001_before.json")
+            payload = json.loads(saved_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["candidate_coordinate_source_counts"], {"ocr": 1})
 
 
 if __name__ == "__main__":

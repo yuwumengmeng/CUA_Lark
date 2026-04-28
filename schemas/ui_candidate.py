@@ -50,7 +50,12 @@ from typing import Any, Mapping, Sequence
 SOURCE_OCR = "ocr"
 SOURCE_UIA = "uia"
 SOURCE_MERGED = "merged"
-SUPPORTED_SOURCES = {SOURCE_OCR, SOURCE_UIA, SOURCE_MERGED}
+SOURCE_VLM_VISUAL = "vlm_visual"
+SUPPORTED_SOURCES = {SOURCE_OCR, SOURCE_UIA, SOURCE_MERGED, SOURCE_VLM_VISUAL}
+
+COORDINATE_TYPE_SCREENSHOT_PIXEL = "screenshot_pixel"
+COORDINATE_TYPE_NORMALIZED = "normalized"
+SUPPORTED_COORDINATE_TYPES = {COORDINATE_TYPE_SCREENSHOT_PIXEL, COORDINATE_TYPE_NORMALIZED}
 
 
 class UISchemaError(ValueError):
@@ -68,6 +73,8 @@ class UICandidate:
     editable: bool = False
     source: str = SOURCE_OCR
     confidence: float = 0.0
+    coordinate_type: str | None = None
+    vlm_reason: str | None = None
 
     def __post_init__(self) -> None:
         candidate_id = self.id.strip()
@@ -88,11 +95,16 @@ class UICandidate:
             raise UISchemaError(f"UICandidate source must be one of: {allowed}")
         if not 0.0 <= self.confidence <= 1.0:
             raise UISchemaError("UICandidate confidence must be between 0.0 and 1.0")
+        if self.coordinate_type is not None and self.coordinate_type not in SUPPORTED_COORDINATE_TYPES:
+            allowed = ", ".join(sorted(SUPPORTED_COORDINATE_TYPES))
+            raise UISchemaError(f"UICandidate coordinate_type must be one of: {allowed}")
         object.__setattr__(self, "id", candidate_id)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "bbox", bbox)
         object.__setattr__(self, "center", center)
         object.__setattr__(self, "role", role)
+        if self.coordinate_type is not None:
+            object.__setattr__(self, "coordinate_type", self.coordinate_type)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "UICandidate":
@@ -110,10 +122,12 @@ class UICandidate:
             editable=_bool_field(data.get("editable", False), "editable"),
             source=str(data["source"]),
             confidence=_float_field(data["confidence"], "confidence"),
+            coordinate_type=str(data["coordinate_type"]) if data.get("coordinate_type") is not None else None,
+            vlm_reason=str(data["vlm_reason"]) if data.get("vlm_reason") is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "text": self.text,
             "bbox": self.bbox,
@@ -124,6 +138,11 @@ class UICandidate:
             "source": self.source,
             "confidence": self.confidence,
         }
+        if self.coordinate_type is not None:
+            payload["coordinate_type"] = self.coordinate_type
+        if self.vlm_reason is not None:
+            payload["vlm_reason"] = self.vlm_reason
+        return payload
 
 
 def candidate_from_ocr(
