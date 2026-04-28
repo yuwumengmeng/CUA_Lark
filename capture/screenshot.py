@@ -123,6 +123,8 @@ class CapturedImage:
     bounds: ScreenBounds
     capture_target: str = "fullscreen"
     window_title: str | None = None
+    monitor_bounds: ScreenBounds | None = None
+    monitor_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,8 @@ class ScreenshotResult:
     coordinate_space: str
     screen_origin: list[int]
     monitor_index: int
+    screen_resolution: list[int]
+    monitor_count: int
     created_at: str
     capture_target: str = "fullscreen"
     window_title: str | None = None
@@ -155,6 +159,8 @@ class ScreenshotResult:
             "coordinate_space": self.coordinate_space,
             "screen_origin": self.screen_origin,
             "monitor_index": self.monitor_index,
+            "screen_resolution": self.screen_resolution,
+            "monitor_count": self.monitor_count,
             "created_at": self.created_at,
             "capture_target": self.capture_target,
             "window_title": self.window_title,
@@ -183,7 +189,12 @@ class MssScreenshotBackend:
                 width=int(monitor["width"]),
                 height=int(monitor["height"]),
             )
-            return CapturedImage(image=image, bounds=bounds)
+            return CapturedImage(
+                image=image,
+                bounds=bounds,
+                monitor_bounds=bounds,
+                monitor_count=_mss_monitor_count(screen_capture.monitors),
+            )
 
     def grab_window(
         self,
@@ -213,6 +224,8 @@ class MssScreenshotBackend:
             "height": bounds.height,
         }
         with mss.mss() as screen_capture:
+            monitor_bounds = _find_containing_monitor_bounds(bounds, screen_capture.monitors)
+            monitor_count = _mss_monitor_count(screen_capture.monitors)
             raw_image = screen_capture.grab(monitor)
             image = Image.frombytes("RGB", raw_image.size, raw_image.bgra, "raw", "BGRX")
         return CapturedImage(
@@ -220,6 +233,8 @@ class MssScreenshotBackend:
             bounds=bounds,
             capture_target="window",
             window_title=window_title,
+            monitor_bounds=monitor_bounds,
+            monitor_count=monitor_count,
         )
 
 
@@ -277,6 +292,7 @@ class ScreenshotCapturer:
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         captured.image.save(screenshot_path, format="PNG")
         width, height = captured.image.size
+        monitor_bounds = captured.monitor_bounds or captured.bounds
         return ScreenshotResult(
             screenshot_path=str(screenshot_path),
             run_id=normalized_run_id,
@@ -288,6 +304,8 @@ class ScreenshotCapturer:
             coordinate_space=self.config.coordinate_space,
             screen_origin=captured.bounds.origin,
             monitor_index=self.config.monitor_index,
+            screen_resolution=[monitor_bounds.width, monitor_bounds.height],
+            monitor_count=captured.monitor_count,
             created_at=_utc_now(),
             capture_target=captured.capture_target,
             window_title=captured.window_title,
@@ -427,6 +445,43 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _mss_monitor_count(monitors: list[dict[str, int]]) -> int:
+    # mss monitor index 0 is the virtual desktop; physical monitors start at 1.
+    return max(len(monitors) - 1, 1)
+
+
+def _find_containing_monitor_bounds(
+    bounds: ScreenBounds,
+    monitors: list[dict[str, int]],
+) -> ScreenBounds | None:
+    physical_monitors = monitors[1:] if len(monitors) > 1 else monitors
+    if not physical_monitors:
+        return None
+
+    def intersection_area(monitor: dict[str, int]) -> int:
+        left = int(monitor["left"])
+        top = int(monitor["top"])
+        right = left + int(monitor["width"])
+        bottom = top + int(monitor["height"])
+        x1 = max(bounds.x, left)
+        y1 = max(bounds.y, top)
+        x2 = min(bounds.x + bounds.width, right)
+        y2 = min(bounds.y + bounds.height, bottom)
+        if x2 <= x1 or y2 <= y1:
+            return 0
+        return (x2 - x1) * (y2 - y1)
+
+    best = max(physical_monitors, key=intersection_area)
+    if intersection_area(best) <= 0:
+        return None
+    return ScreenBounds(
+        x=int(best["left"]),
+        y=int(best["top"]),
+        width=int(best["width"]),
+        height=int(best["height"]),
+    )
+
+
 def _resolve_maximize_window(maximize_window: bool | None, window_title: str | None) -> bool:
     if maximize_window is None:
         return window_title is not None
@@ -466,7 +521,28 @@ def _find_window(window_title: str) -> tuple[int, str, ScreenBounds]:
     if not matches:
         raise CaptureError(f"Window was not found by title: {window_title}")
 
-    return max(matches, key=lambda item: item[2].width * item[2].height)
+    return _select_window_match(matches, title_keyword)
+
+
+def _select_window_match(
+    matches: list[tuple[int, str, ScreenBounds]],
+    title_keyword: str,
+) -> tuple[int, str, ScreenBounds]:
+    keyword = title_keyword.strip().casefold()
+
+    def match_key(item: tuple[int, str, ScreenBounds]) -> tuple[int, int, int, int, int]:
+        _, title, bounds = item
+        normalized_title = title.strip().casefold()
+        keyword_pos = normalized_title.find(keyword)
+        return (
+            int(normalized_title == keyword),
+            int(normalized_title.startswith(keyword)),
+            -keyword_pos,
+            -len(normalized_title),
+            bounds.width * bounds.height,
+        )
+
+    return max(matches, key=match_key)
 
 
 def _window_bounds(hwnd: int) -> ScreenBounds:

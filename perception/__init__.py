@@ -18,6 +18,7 @@ from .ocr import (
     PytesseractOCRBackend,
     extract_ocr_elements,
 )
+from .health import assess_perception_health, build_perception_health_summary
 from .ui_state import UIStateCollectionError, collect_ui_state, get_ui_state
 from .uia import (
     UIAConfig,
@@ -44,6 +45,8 @@ __all__ = [
     "build_ui_state_from_elements",
     "extract_ocr_elements",
     "extract_uia_elements",
+    "assess_perception_health",
+    "build_perception_health_summary",
     "collect_ui_state",
     "get_ui_state",
 ]

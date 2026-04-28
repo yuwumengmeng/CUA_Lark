@@ -55,6 +55,7 @@ CaptureError = screenshot_module.CaptureError
 ScreenBounds = screenshot_module.ScreenBounds
 ScreenshotCaptureConfig = screenshot_module.ScreenshotCaptureConfig
 ScreenshotCapturer = screenshot_module.ScreenshotCapturer
+select_window_match = screenshot_module._select_window_match
 
 
 class FakeScreenshotBackend:
@@ -103,6 +104,8 @@ class FakeScreenshotBackend:
             bounds=bounds,
             capture_target="window",
             window_title=window_title,
+            monitor_bounds=ScreenBounds(x=0, y=0, width=2560, height=1440),
+            monitor_count=2,
         )
 
 
@@ -131,6 +134,8 @@ class ScreenshotCaptureTests(unittest.TestCase):
             self.assertEqual(before.screen_origin, [10, 20])
             self.assertEqual(before.coordinate_space, "screen")
             self.assertEqual(before.monitor_index, 1)
+            self.assertEqual(before.screen_resolution, [64, 32])
+            self.assertEqual(before.monitor_count, 1)
             self.assertEqual(before.capture_target, "fullscreen")
             self.assertIsNone(before.window_title)
             self.assertEqual(backend.monitor_indexes, [1, 1])
@@ -172,11 +177,30 @@ class ScreenshotCaptureTests(unittest.TestCase):
             self.assertEqual(result.height, 70)
             self.assertEqual(result.bbox, [4000, -20, 4100, 50])
             self.assertEqual(result.screen_origin, [4000, -20])
+            self.assertEqual(result.screen_resolution, [2560, 1440])
+            self.assertEqual(result.monitor_count, 2)
             self.assertEqual(result.capture_target, "window")
             self.assertEqual(result.window_title, "飞书")
             self.assertEqual(result.to_dict()["capture_target"], "window")
             self.assertEqual(result.to_dict()["window_title"], "飞书")
+            self.assertEqual(result.to_dict()["screen_resolution"], [2560, 1440])
+            self.assertEqual(result.to_dict()["monitor_count"], 2)
             self.assertEqual(backend.window_capture_calls, [("飞书", True, True, 0.1)])
+
+    def test_window_match_prefers_exact_title_over_larger_substring(self):
+        matches = [
+            (
+                1,
+                "yuwumengmeng/CUA-Lark 飞书测试 - Google Chrome",
+                ScreenBounds(x=0, y=0, width=2400, height=1400),
+            ),
+            (2, "飞书", ScreenBounds(x=2600, y=300, width=1200, height=900)),
+        ]
+
+        hwnd, title, _ = select_window_match(matches, "飞书")
+
+        self.assertEqual(hwnd, 2)
+        self.assertEqual(title, "飞书")
 
     def test_invalid_step_idx_is_rejected(self):
         capturer = ScreenshotCapturer(backend=FakeScreenshotBackend())
