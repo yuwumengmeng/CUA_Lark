@@ -4,7 +4,7 @@
 验证 `planner/mini_planner.py` 能用 fake `ui_state` 和 fake executor 跑通
 最小闭环：读取任务、选择下一步动作、调用执行器、更新 runtime state。
 同时覆盖 4.24 第 4 项的三类规则型决策：文本命中型点击、输入框定位型
-输入、返回 / 等待类动作。
+输入、返回 / 等待类动作；第二周期补充验证“文档入口”和已有文档列表项的轻量消歧。
 
 重要约定：
 本测试不访问真实飞书窗口、不截图、不移动鼠标，所有页面状态和执行结果
@@ -53,6 +53,16 @@ class MiniPlannerTests(unittest.TestCase):
         self.assertEqual(decision["x"], 120)
         self.assertEqual(decision["y"], 40)
         self.assertEqual(state.page_summary["candidate_count"], 2)
+
+    def test_docs_entry_prefers_nav_entry_over_document_list_item(self):
+        planner = MiniPlanner()
+        state = create_runtime_state("点击文档入口")
+
+        decision = planner.plan_next_action("点击文档入口", docs_entry_disambiguation_state(), state)
+
+        self.assertEqual(decision["status"], "continue")
+        self.assertEqual(decision["target_element_id"], "elem_docs_entry")
+        self.assertEqual(decision["planner_meta"]["matched_text"], "文档")
 
     def test_run_once_completes_single_click_task(self):
         planner = MiniPlanner()
@@ -310,6 +320,43 @@ def fake_ui_state(primary_text: str) -> dict:
         "page_summary": {
             "top_texts": [candidate["text"] for candidate in candidates],
             "has_search_box": True,
+            "has_modal": False,
+            "candidate_count": len(candidates),
+        },
+    }
+
+
+def docs_entry_disambiguation_state() -> dict:
+    candidates = [
+        {
+            "id": "elem_existing_doc",
+            "text": "文档",
+            "bbox": [380, 200, 760, 252],
+            "center": [570, 226],
+            "role": "LarkDocumentListItem",
+            "clickable": True,
+            "editable": False,
+            "source": "merged",
+            "confidence": 0.99,
+        },
+        {
+            "id": "elem_docs_entry",
+            "text": "文档",
+            "bbox": [80, 20, 160, 60],
+            "center": [120, 40],
+            "role": "LarkMainNavItem",
+            "clickable": True,
+            "editable": False,
+            "source": "merged",
+            "confidence": 0.4,
+        },
+    ]
+    return {
+        "screenshot_path": "artifacts/runs/run_test/screenshots/docs_disambiguation.png",
+        "candidates": candidates,
+        "page_summary": {
+            "top_texts": ["文档"],
+            "has_search_box": False,
             "has_modal": False,
             "candidate_count": len(candidates),
         },

@@ -58,6 +58,7 @@ class ActionDecisionTests(unittest.TestCase):
                 "y": 238,
                 "text": None,
                 "keys": None,
+                "repeat": None,
                 "seconds": None,
                 "reason": "matched target_text=测试群",
                 "failure_reason": None,
@@ -88,6 +89,22 @@ class ActionDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.to_dict()["keys"], ["alt", "left"])
+
+    def test_hotkey_decision_can_repeat(self):
+        decision = ActionDecision.continue_(
+            action_type=ACTION_HOTKEY,
+            keys=["esc"],
+            repeat=2,
+            reason="clear search text and close popup",
+        )
+
+        self.assertEqual(decision.to_dict()["repeat"], 2)
+        self.assertEqual(action_decision_to_executor_payload(decision.to_dict())["repeat"], 2)
+
+        with self.assertRaises(ActionDecisionSchemaError):
+            ActionDecision.continue_(action_type=ACTION_HOTKEY, keys=["esc"], repeat=0)
+        with self.assertRaises(ActionDecisionSchemaError):
+            ActionDecision.continue_(action_type=ACTION_TYPE, text="项目周报", repeat=2)
 
     def test_wait_decision_outputs_seconds(self):
         decision = ActionDecision.continue_(
@@ -120,6 +137,7 @@ class ActionDecisionTests(unittest.TestCase):
             "y": 40,
             "text": None,
             "keys": None,
+            "repeat": None,
             "seconds": None,
             "reason": "matched target_text=文档",
             "failure_reason": None,
