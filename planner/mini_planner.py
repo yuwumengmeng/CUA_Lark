@@ -18,18 +18,19 @@ step-level 成功判断。它不负责真实截图、不负责 OCR/UIA，也不�
 输入输出规则：
 `ui_state` 必须使用成员 A 的顶层字段：`screenshot_path / candidates /
 page_summary`。candidate 第一周期至少依赖 `id / text / bbox / center /
-role / clickable / editable / confidence`。
+role / clickable / editable / confidence`。文档入口类任务会额外用候选 role/id/source
+区分入口与已有内容项，避免只按文本命中误点文档列表项。
 
 动作决策规则：
 本文件通过 `planner/action_protocol.py` 生成 dict 形式的 action decision。
 稳定字段为 `status / action_type / target_element_id / x / y / text / keys /
-seconds / reason / failure_reason / version`。`planner_meta` 只用于 B 内部推进
-step，不属于 C 必须依赖的执行协议。
+repeat / seconds / reason / failure_reason / version`。`planner_meta` 只用于
+B 内部推进 step，不属于 C 必须依赖的执行协议。
 
 协作规则：
 1. B 只根据 A 的 `ui_state` 做选择，不直接解析 OCR/UIA 原始结果。
-2. C 只消费 `action_type / target_element_id / x / y / text / keys / seconds /
-   reason` 这些可执行字段。
+2. C 只消费 `action_type / target_element_id / x / y / text / keys / repeat /
+   seconds / reason` 这些可执行字段。
 3. `planner_meta` 只给 B 自己更新 runtime state 使用，不要写入 executor 依赖。
 """
 
@@ -70,6 +71,10 @@ from .task_schema import (
 
 GetUIState = Callable[[], Mapping[str, Any]]
 ExecuteAction = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+CANDIDATE_KIND_ENTRY = "entry"
+CANDIDATE_KIND_SEARCH_INPUT = "search_input"
+CANDIDATE_KIND_REJECT_SCORE = -100.0
 
 
 @dataclass(slots=True)
@@ -211,9 +216,13 @@ class MiniPlanner:
 
         if step.action_hint == ACTION_HOTKEY_BACK:
             keys = list(step.params.get("keys", ["alt", "left"]))
+            repeat = step.params.get("repeat")
             return _decision_continue(
                 action_type=ACTION_HOTKEY,
                 keys=keys,
+                repeat=repeat
+                if isinstance(repeat, int) and not isinstance(repeat, bool)
+                else None,
                 reason=f"hotkey back for step_idx={step_idx}",
             )
 
@@ -233,6 +242,7 @@ class MiniPlanner:
                 target_text=step.target_text or "搜索",
                 target_role=step.target_role,
                 prefer_editable=True,
+                expected_kind=CANDIDATE_KIND_SEARCH_INPUT,
             )
             if candidate is None:
                 return _decision_failed(FAILURE_TARGET_NOT_FOUND, "search box candidate not found")
@@ -240,7 +250,11 @@ class MiniPlanner:
 
         if step.action_hint in {ACTION_FIND_CHAT, ACTION_FIND_SIDEBAR_MODULE, ACTION_CLICK_TARGET}:
             target_text = _target_text_for_step(task, step)
-            candidate = _best_candidate(candidates, target_text=target_text)
+            candidate = _best_candidate(
+                candidates,
+                target_text=target_text,
+                expected_kind=_expected_candidate_kind(task, step),
+            )
             if candidate is None:
                 candidate = _unique_chat_row_suffix_candidate(task, candidates, target_text)
                 if candidate is None:
@@ -486,6 +500,7 @@ def _best_candidate(
     target_text: str | None = None,
     target_role: str | None = None,
     prefer_editable: bool = False,
+    expected_kind: str | None = None,
 ) -> dict[str, Any] | None:
     scored: list[tuple[float, dict[str, Any]]] = []
     for candidate in candidates:
@@ -494,6 +509,7 @@ def _best_candidate(
             target_text=target_text,
             target_role=target_role,
             prefer_editable=prefer_editable,
+            expected_kind=expected_kind,
         )
         if score > 0:
             scored.append((score, candidate))
@@ -509,6 +525,7 @@ def _candidate_score(
     target_text: str | None,
     target_role: str | None,
     prefer_editable: bool,
+    expected_kind: str | None = None,
 ) -> float:
     text = str(candidate.get("text") or "")
     role = str(candidate.get("role") or "")
@@ -516,11 +533,16 @@ def _candidate_score(
     preferred_input = prefer_editable and (
         candidate.get("editable") is True or _role_matches(role, "edit")
     )
+    kind_score = _candidate_kind_score(candidate, expected_kind)
+    if kind_score == CANDIDATE_KIND_REJECT_SCORE:
+        return CANDIDATE_KIND_REJECT_SCORE
 
     if target_text:
         match_score = _candidate_text_match_score(text, target_text)
         if match_score is not None:
             score += match_score
+        elif expected_kind == CANDIDATE_KIND_ENTRY:
+            return CANDIDATE_KIND_REJECT_SCORE
         elif preferred_input:
             score += 1.0
         else:
@@ -538,7 +560,113 @@ def _candidate_score(
     if _candidate_point(candidate) is None:
         score -= 20.0
 
+    score += kind_score
     return score
+
+
+def _candidate_kind_score(candidate: Mapping[str, Any], expected_kind: str | None) -> float:
+    if expected_kind is None:
+        return 0.0
+    if expected_kind == CANDIDATE_KIND_SEARCH_INPUT:
+        if _is_browser_shell_candidate(candidate):
+            return CANDIDATE_KIND_REJECT_SCORE
+        if _is_search_input_candidate(candidate):
+            return 8.0
+        return -8.0
+    if expected_kind == CANDIDATE_KIND_ENTRY:
+        if _is_content_item_candidate(candidate) or _is_plain_text_candidate(candidate):
+            return CANDIDATE_KIND_REJECT_SCORE
+        if _is_entry_candidate(candidate):
+            return 10.0
+        if candidate.get("clickable") is True:
+            return 3.0
+        return -8.0
+    return 0.0
+
+
+def _expected_candidate_kind(task: TaskSpec, step: TaskStep) -> str | None:
+    if task.goal == GOAL_OPEN_DOCS and step.action_hint in {ACTION_FIND_SIDEBAR_MODULE, ACTION_CLICK_TARGET}:
+        return CANDIDATE_KIND_ENTRY
+    return None
+
+
+def _is_entry_candidate(candidate: Mapping[str, Any]) -> bool:
+    blob = _candidate_blob(candidate)
+    return any(
+        keyword in blob
+        for keyword in (
+            "larkmainnavitem",
+            "larksecondarynavitem",
+            "nav",
+            "sidebar",
+            "entry",
+            "shortcut",
+            "menuitem",
+            "button",
+            "tabitem",
+        )
+    )
+
+
+def _is_content_item_candidate(candidate: Mapping[str, Any]) -> bool:
+    blob = _candidate_blob(candidate)
+    return any(
+        keyword in blob
+        for keyword in (
+            "documentlistitem",
+            "doclistitem",
+            "document_item",
+            "doc_item",
+            "fileitem",
+            "contentitem",
+            "listitem",
+            "card",
+            "row",
+        )
+    )
+
+
+def _is_browser_shell_candidate(candidate: Mapping[str, Any]) -> bool:
+    blob = _candidate_blob(candidate)
+    return any(
+        keyword in blob
+        for keyword in (
+            "browser",
+            "chrome",
+            "chromium",
+            "edge",
+            "address",
+            "omnibox",
+            "url",
+            "titlebar",
+            "toolbar",
+            "地址栏",
+        )
+    )
+
+
+def _is_search_input_candidate(candidate: Mapping[str, Any]) -> bool:
+    blob = _candidate_blob(candidate)
+    if _is_browser_shell_candidate(candidate):
+        return False
+    return (
+        "larksearchbox" in blob
+        or "searchbox" in blob
+        or "global_search" in blob
+        or "search" in blob
+        or "搜索" in blob
+        or (candidate.get("editable") is True or _role_matches(str(candidate.get("role") or ""), "edit"))
+    )
+
+
+def _is_plain_text_candidate(candidate: Mapping[str, Any]) -> bool:
+    role = str(candidate.get("role") or "").casefold()
+    source = str(candidate.get("source") or "").casefold()
+    return (
+        not candidate.get("clickable")
+        and not candidate.get("editable")
+        and (source == "ocr" or role in {"text", "statictext", "label"})
+    )
 
 
 def _role_matches(role: str, target_role: str | None) -> bool:
@@ -714,6 +842,22 @@ def _is_meaningful_partial_match(text: Any, target_text: Any) -> bool:
     if len(candidate) < 2 and len(target) > 1:
         return False
     return len(candidate) / len(target) >= 0.5
+
+
+def _candidate_blob(candidate: Mapping[str, Any]) -> str:
+    return " ".join(
+        str(candidate.get(field_name) or "").casefold()
+        for field_name in (
+            "id",
+            "text",
+            "role",
+            "source",
+            "candidate_type",
+            "semantic_type",
+            "type",
+            "class_name",
+        )
+    )
 
 
 def _normalize_match_text(value: Any) -> str:
