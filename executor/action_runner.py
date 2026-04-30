@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, Sequence
 
 from schemas import ActionResult, action_result_from_exception, utc_now
 
@@ -113,6 +113,10 @@ class ExecutorWithRecorder:
         action_decision: Mapping[str, Any],
         *,
         step_idx: int,
+        after_ui_state: Mapping[str, Any] | Any | None = None,
+        validator_result: Mapping[str, Any] | Any | None = None,
+        failure_reason: str | None = None,
+        executed_action: Mapping[str, Any] | None = None,
     ) -> StepExecutionResult:
         before_screenshot: Any | None = None
         after_screenshot: Any | None = None
@@ -129,6 +133,11 @@ class ExecutorWithRecorder:
                 step_idx=step_idx,
                 action_decision=action_decision,
                 action_result=action_result,
+                step_name=_step_name(action_decision),
+                executed_action=executed_action,
+                after_ui_state=after_ui_state,
+                validator_result=validator_result,
+                failure_reason=failure_reason or "before_screenshot_failed",
             )
             return StepExecutionResult(
                 run_id=self.run_id,
@@ -149,12 +158,23 @@ class ExecutorWithRecorder:
         except Exception as exc:
             action_result = _failure_result(action_decision, f"after_screenshot_failed: {exc}")
 
+        action_result = _with_artifacts(
+            action_result,
+            before_screenshot=before_screenshot,
+            after_screenshot=after_screenshot,
+            after_ui_state=after_ui_state,
+        )
         summary = self.recorder.record_step(
             step_idx=step_idx,
             action_decision=action_decision,
             action_result=action_result,
             before_screenshot=before_screenshot,
             after_screenshot=after_screenshot,
+            step_name=_step_name(action_decision),
+            executed_action=executed_action,
+            after_ui_state=after_ui_state,
+            validator_result=validator_result,
+            failure_reason=failure_reason,
         )
         return StepExecutionResult(
             run_id=self.run_id,
@@ -164,6 +184,24 @@ class ExecutorWithRecorder:
             after_screenshot=_optional_jsonable(after_screenshot),
             summary=summary,
         )
+
+    def run_steps(
+        self,
+        action_decisions: Sequence[Mapping[str, Any]],
+        *,
+        start_step_idx: int = 1,
+    ) -> list[StepExecutionResult]:
+        if start_step_idx < 0:
+            raise ValueError("start_step_idx must be non-negative")
+        results: list[StepExecutionResult] = []
+        for offset, action_decision in enumerate(action_decisions):
+            results.append(
+                self.run_step(
+                    action_decision,
+                    step_idx=start_step_idx + offset,
+                )
+            )
+        return results
 
     def finalize(
         self,
@@ -183,6 +221,10 @@ def run_step(
     artifact_root: str | Path | None = None,
     backend: DesktopActionBackend | None = None,
     screenshot_capturer: StepScreenshotCapturer | None = None,
+    after_ui_state: Mapping[str, Any] | Any | None = None,
+    validator_result: Mapping[str, Any] | Any | None = None,
+    failure_reason: str | None = None,
+    executed_action: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     runner = ExecutorWithRecorder(
         run_id=run_id,
@@ -191,7 +233,42 @@ def run_step(
         backend=backend,
         screenshot_capturer=screenshot_capturer,
     )
-    return runner.run_step(action_decision, step_idx=step_idx).to_dict()
+    return runner.run_step(
+        action_decision,
+        step_idx=step_idx,
+        after_ui_state=after_ui_state,
+        validator_result=validator_result,
+        failure_reason=failure_reason,
+        executed_action=executed_action,
+    ).to_dict()
+
+
+def run_steps(
+    action_decisions: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str | None = None,
+    task: Mapping[str, Any] | Any | None = None,
+    artifact_root: str | Path | None = None,
+    backend: DesktopActionBackend | None = None,
+    screenshot_capturer: StepScreenshotCapturer | None = None,
+    start_step_idx: int = 1,
+    finalize: bool = True,
+    status: str | None = None,
+) -> dict[str, Any]:
+    runner = ExecutorWithRecorder(
+        run_id=run_id,
+        task=task,
+        artifact_root=artifact_root,
+        backend=backend,
+        screenshot_capturer=screenshot_capturer,
+    )
+    step_results = runner.run_steps(action_decisions, start_step_idx=start_step_idx)
+    summary = runner.finalize(status=status) if finalize else runner.recorder.summary_payload()
+    return {
+        "run_id": runner.run_id,
+        "steps": [result.to_dict() for result in step_results],
+        "summary": summary,
+    }
 
 
 def _default_screenshot_capturer(
@@ -241,3 +318,61 @@ def _optional_jsonable(value: Mapping[str, Any] | Any | None) -> dict[str, Any] 
         if isinstance(data, Mapping):
             return dict(data)
     return {"repr": repr(value)}
+
+
+def _with_artifacts(
+    action_result: ActionResult,
+    *,
+    before_screenshot: Mapping[str, Any] | Any | None,
+    after_screenshot: Mapping[str, Any] | Any | None,
+    after_ui_state: Mapping[str, Any] | Any | None,
+) -> ActionResult:
+    payload = action_result.to_dict()
+    payload["before_screenshot"] = payload.get("before_screenshot") or _optional_jsonable(
+        before_screenshot
+    )
+    payload["after_screenshot"] = payload.get("after_screenshot") or _optional_jsonable(
+        after_screenshot
+    )
+    payload["screen_meta_snapshot"] = payload.get("screen_meta_snapshot") or _screen_meta_snapshot(
+        before_screenshot=before_screenshot,
+        after_screenshot=after_screenshot,
+        after_ui_state=after_ui_state,
+    )
+    return ActionResult.from_dict(payload)
+
+
+def _screen_meta_snapshot(
+    *,
+    before_screenshot: Mapping[str, Any] | Any | None,
+    after_screenshot: Mapping[str, Any] | Any | None,
+    after_ui_state: Mapping[str, Any] | Any | None,
+) -> dict[str, Any] | None:
+    after_ui_state_payload = _optional_jsonable(after_ui_state)
+    if after_ui_state_payload is not None and isinstance(after_ui_state_payload.get("screen_meta"), Mapping):
+        return dict(after_ui_state_payload["screen_meta"])
+
+    screenshot_payload = _optional_jsonable(after_screenshot) or _optional_jsonable(before_screenshot)
+    if screenshot_payload is None:
+        return None
+    result: dict[str, Any] = {}
+    if screenshot_payload.get("width") is not None and screenshot_payload.get("height") is not None:
+        result["screenshot_size"] = [screenshot_payload["width"], screenshot_payload["height"]]
+    if screenshot_payload.get("screen_resolution") is not None:
+        result["screen_resolution"] = screenshot_payload["screen_resolution"]
+    if screenshot_payload.get("bbox") is not None:
+        result["window_rect"] = screenshot_payload["bbox"]
+    if screenshot_payload.get("screen_origin") is not None:
+        result["screen_origin"] = screenshot_payload["screen_origin"]
+    for key in ("coordinate_space", "capture_target", "monitor_index", "monitor_count"):
+        if screenshot_payload.get(key) is not None:
+            result[key] = screenshot_payload[key]
+    return result or None
+
+
+def _step_name(action_decision: Mapping[str, Any]) -> str | None:
+    value = action_decision.get("step_name")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

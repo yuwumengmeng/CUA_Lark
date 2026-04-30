@@ -195,14 +195,20 @@ class BaseExecutor:
     def execute_action(self, action_decision: Mapping[str, Any]) -> ActionResult:
         start_ts = utc_now()
         action_type = _action_type_for_result(action_decision)
+        target_candidate_id = _target_candidate_id(action_decision)
+        planned_click_point = _safe_planned_click_point(action_decision)
 
         try:
             normalized_action_type = _normalize_action_type(action_decision)
-            self._execute_normalized(normalized_action_type, action_decision)
+            actual_click_point = self._execute_normalized(normalized_action_type, action_decision)
             return ActionResult.success(
                 action_type=normalized_action_type,
                 start_ts=start_ts,
                 end_ts=utc_now(),
+                target_candidate_id=target_candidate_id,
+                planned_click_point=planned_click_point,
+                actual_click_point=actual_click_point,
+                executor_message=f"executed {normalized_action_type}",
             )
         except Exception as exc:
             return action_result_from_exception(
@@ -210,59 +216,66 @@ class BaseExecutor:
                 start_ts=start_ts,
                 end_ts=utc_now(),
                 error=exc,
+                target_candidate_id=target_candidate_id,
+                planned_click_point=planned_click_point,
+                executor_message=f"failed {action_type}",
             )
 
     def _execute_normalized(
         self,
         action_type: str,
         action_decision: Mapping[str, Any],
-    ) -> None:
+    ) -> list[int] | None:
         if action_type == ACTION_CLICK:
             x, y = resolve_action_point(action_decision)
             self.backend.wait(self.config.click_stability_delay_seconds)
             self.backend.click(x, y)
-            return
+            return [x, y]
 
         if action_type == ACTION_DOUBLE_CLICK:
             x, y = resolve_action_point(action_decision)
             self.backend.wait(self.config.click_stability_delay_seconds)
             self.backend.double_click(x, y)
-            return
+            return [x, y]
 
         if action_type == ACTION_SCROLL:
             x, y = resolve_optional_action_point(action_decision)
             self.backend.scroll(_scroll_amount(action_decision, self.config), x=x, y=y)
-            return
+            return None
 
         if action_type == ACTION_TYPE:
             text = _required_text(action_decision)
             point = resolve_optional_action_point(action_decision)
+            actual_click_point: list[int] | None = None
             if point != (None, None):
                 x, y = point
                 if x is not None and y is not None:
                     self.backend.click(x, y)
+                    actual_click_point = [x, y]
                     self.backend.wait(self.config.type_focus_delay_seconds)
             self.backend.type_text(text, interval=self.config.type_interval_seconds)
-            return
+            return actual_click_point
 
         if action_type == ACTION_HOTKEY:
             keys = _required_keys(action_decision)
             repeat = _hotkey_repeat_count(action_decision)
             point = resolve_optional_action_point(action_decision)
+            actual_click_point = None
             if point != (None, None):
                 x, y = point
                 if x is not None and y is not None:
                     self.backend.click(x, y)
+                    actual_click_point = [x, y]
                     self.backend.wait(self.config.hotkey_focus_delay_seconds)
             for index in range(repeat):
                 if index > 0:
                     self.backend.wait(self.config.hotkey_repeat_delay_seconds)
                 self.backend.hotkey(keys)
-            return
+            return actual_click_point
 
         if action_type == ACTION_WAIT:
             self.backend.wait(_wait_seconds(action_decision, self.config))
-            return
+            return None
 
         raise ActionDecisionError(f"unsupported action_type: {action_type}")
 
@@ -302,6 +315,34 @@ def resolve_optional_action_point(action_decision: Mapping[str, Any]) -> tuple[i
             return resolve_click_point(candidate)
 
     return None, None
+
+
+def _target_candidate_id(action_decision: Mapping[str, Any]) -> str | None:
+    for field_name in ("target_candidate_id", "target_element_id"):
+        value = action_decision.get(field_name)
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+    for field_name in ("target_candidate", "candidate", "target_element", "element"):
+        candidate = action_decision.get(field_name)
+        if isinstance(candidate, Mapping):
+            candidate_id = candidate.get("id")
+            if candidate_id is not None:
+                text = str(candidate_id).strip()
+                if text:
+                    return text
+    return None
+
+
+def _safe_planned_click_point(action_decision: Mapping[str, Any]) -> list[int] | None:
+    try:
+        x, y = resolve_optional_action_point(action_decision)
+    except Exception:
+        return None
+    if x is None or y is None:
+        return None
+    return [x, y]
 
 
 def _normalize_action_type(action_decision: Mapping[str, Any]) -> str:

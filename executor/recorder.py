@@ -55,6 +55,8 @@ RUN_SUMMARY_SCHEMA_VERSION = "run_summary.v1"
 ACTION_LOG_SCHEMA_VERSION = "action_log.v1"
 RESULT_LOG_SCHEMA_VERSION = "result_log.v1"
 SCREENSHOT_LOG_SCHEMA_VERSION = "screenshot_log.v1"
+VALIDATOR_LOG_SCHEMA_VERSION = "validator_log.v1"
+UI_STATE_LOG_SCHEMA_VERSION = "ui_state_log.v1"
 
 
 class RunRecorderError(ValueError):
@@ -69,6 +71,8 @@ class RunArtifactPaths:
     actions_path: Path
     results_path: Path
     screenshot_log_path: Path
+    validator_log_path: Path
+    ui_state_log_path: Path
     screenshots_dir: Path
     summary_path: Path
 
@@ -84,6 +88,8 @@ class RunArtifactPaths:
             actions_path=run_root / "actions.jsonl",
             results_path=run_root / "results.jsonl",
             screenshot_log_path=run_root / "screenshot_log.jsonl",
+            validator_log_path=run_root / "validator_log.jsonl",
+            ui_state_log_path=run_root / "ui_state_log.jsonl",
             screenshots_dir=run_root / "screenshots",
             summary_path=run_root / "summary.json",
         )
@@ -99,6 +105,8 @@ class RunArtifactPaths:
             "actions_path": str(self.actions_path),
             "results_path": str(self.results_path),
             "screenshot_log_path": str(self.screenshot_log_path),
+            "validator_log_path": str(self.validator_log_path),
+            "ui_state_log_path": str(self.ui_state_log_path),
             "screenshots_dir": str(self.screenshots_dir),
             "summary_path": str(self.summary_path),
         }
@@ -121,6 +129,9 @@ class RunRecorder:
         self.success_count = 0
         self.failure_count = 0
         self._stats: dict[str, dict[str, int]] = {}
+        self._failure_reasons: dict[str, int] = {}
+        self._validator_count = 0
+        self._validator_failure_count = 0
         self._task_saved = False
         self._status = "running"
         self._failure_reason: str | None = None
@@ -145,39 +156,77 @@ class RunRecorder:
         action_result: ActionResult | Mapping[str, Any],
         before_screenshot: Mapping[str, Any] | Any | None = None,
         after_screenshot: Mapping[str, Any] | Any | None = None,
+        step_name: str | None = None,
+        executed_action: Mapping[str, Any] | None = None,
+        after_ui_state: Mapping[str, Any] | Any | None = None,
+        validator_result: Mapping[str, Any] | Any | None = None,
+        failure_reason: str | None = None,
     ) -> dict[str, Any]:
         normalized_step_idx = _non_negative_int(step_idx, "step_idx")
         action_payload = _mapping_field(action_decision, "action_decision")
         result = _action_result(action_result)
         recorded_at = utc_now()
+        normalized_step_name = _optional_str(step_name) or _optional_str(action_payload.get("step_name"))
+        normalized_failure_reason = _optional_str(failure_reason) or _optional_str(
+            result.error if not result.ok else None
+        )
+        validator_payload = _optional_jsonable(validator_result)
+        after_ui_state_payload = _optional_jsonable(after_ui_state)
 
         action_record = {
             "version": ACTION_LOG_SCHEMA_VERSION,
             "run_id": self.run_id,
             "step_idx": normalized_step_idx,
+            "step_name": normalized_step_name,
             "recorded_at": recorded_at,
             "action": action_payload,
+            "executed_action": dict(executed_action) if executed_action is not None else action_payload,
         }
         result_record = {
             "version": RESULT_LOG_SCHEMA_VERSION,
             "run_id": self.run_id,
             "step_idx": normalized_step_idx,
+            "step_name": normalized_step_name,
             "recorded_at": recorded_at,
             "result": result.to_dict(),
+            "failure_reason": normalized_failure_reason,
         }
         screenshot_record = {
             "version": SCREENSHOT_LOG_SCHEMA_VERSION,
             "run_id": self.run_id,
             "step_idx": normalized_step_idx,
+            "step_name": normalized_step_name,
             "recorded_at": recorded_at,
             "before": _optional_jsonable(before_screenshot),
             "after": _optional_jsonable(after_screenshot),
+        }
+        validator_record = {
+            "version": VALIDATOR_LOG_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "step_idx": normalized_step_idx,
+            "step_name": normalized_step_name,
+            "recorded_at": recorded_at,
+            "validator_result": validator_payload,
+        }
+        ui_state_record = {
+            "version": UI_STATE_LOG_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "step_idx": normalized_step_idx,
+            "step_name": normalized_step_name,
+            "recorded_at": recorded_at,
+            "after_ui_state": after_ui_state_payload,
         }
 
         append_jsonl(self.paths.actions_path, action_record)
         append_jsonl(self.paths.results_path, result_record)
         append_jsonl(self.paths.screenshot_log_path, screenshot_record)
-        self._update_stats(result)
+        append_jsonl(self.paths.validator_log_path, validator_record)
+        append_jsonl(self.paths.ui_state_log_path, ui_state_record)
+        self._update_stats(
+            result,
+            failure_reason=normalized_failure_reason,
+            validator_result=validator_payload,
+        )
         return self.write_summary()
 
     def finalize(
@@ -216,25 +265,64 @@ class RunRecorder:
             "step_count": self.step_count,
             "success_count": self.success_count,
             "failure_count": self.failure_count,
+            "success_rate": self._success_rate(),
+            "avg_step_duration_ms": self._avg_step_duration_ms(),
+            "validator_count": self._validator_count,
+            "validator_failure_count": self._validator_failure_count,
+            "failure_reasons": dict(sorted(self._failure_reasons.items())),
             "action_stats": self._action_stats_payload(),
             "artifact_paths": self.paths.to_dict(),
         }
 
-    def _update_stats(self, result: ActionResult) -> None:
+    def _success_rate(self) -> float:
+        if self.step_count == 0:
+            return 0.0
+        return round(self.success_count / self.step_count, 4)
+
+    def _avg_step_duration_ms(self) -> int:
+        if self.step_count == 0:
+            return 0
+        total_duration = sum(stats["total_duration_ms"] for stats in self._stats.values())
+        return total_duration // self.step_count
+
+    def _update_stats(
+        self,
+        result: ActionResult,
+        *,
+        failure_reason: str | None,
+        validator_result: Mapping[str, Any] | None,
+    ) -> None:
         self.step_count += 1
         if result.ok:
             self.success_count += 1
         else:
             self.failure_count += 1
+        if failure_reason is not None:
+            self._failure_reasons[failure_reason] = self._failure_reasons.get(failure_reason, 0) + 1
+        if validator_result is not None:
+            self._validator_count += 1
+            if validator_result.get("passed") is False:
+                self._validator_failure_count += 1
 
         stats = self._stats.setdefault(
             result.action_type,
-            {"count": 0, "failure_count": 0, "total_duration_ms": 0},
+            {
+                "count": 0,
+                "failure_count": 0,
+                "total_duration_ms": 0,
+                "click_offset_count": 0,
+                "total_abs_click_offset_x": 0,
+                "total_abs_click_offset_y": 0,
+            },
         )
         stats["count"] += 1
         if not result.ok:
             stats["failure_count"] += 1
         stats["total_duration_ms"] += result.duration_ms or 0
+        if result.click_offset is not None:
+            stats["click_offset_count"] += 1
+            stats["total_abs_click_offset_x"] += abs(result.click_offset[0])
+            stats["total_abs_click_offset_y"] += abs(result.click_offset[1])
 
     def _action_stats_payload(self) -> dict[str, dict[str, int]]:
         payload: dict[str, dict[str, int]] = {}
@@ -246,6 +334,14 @@ class RunRecorder:
                 "failure_count": stats["failure_count"],
                 "avg_duration_ms": total_duration // count if count else 0,
             }
+            click_offset_count = stats.get("click_offset_count", 0)
+            if click_offset_count:
+                payload[action_type]["avg_abs_click_offset_x"] = (
+                    stats["total_abs_click_offset_x"] // click_offset_count
+                )
+                payload[action_type]["avg_abs_click_offset_y"] = (
+                    stats["total_abs_click_offset_y"] // click_offset_count
+                )
         return payload
 
 
