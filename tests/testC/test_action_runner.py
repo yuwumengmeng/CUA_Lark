@@ -18,7 +18,8 @@ import json
 import tempfile
 import unittest
 
-from executor import ExecutorWithRecorder, RunRecorder, run_step
+from executor import ExecutorWithRecorder, RunRecorder, run_step, run_steps
+from planner.action_protocol import ActionDecisionV2
 
 
 class FakeScreenshot:
@@ -94,12 +95,20 @@ class ExecutorWithRecorderTests(unittest.TestCase):
             )
 
             step_result = runner.run_step(
-                {"action_type": "click", "x": 10, "y": 20},
+                {"action_type": "click", "step_name": "open_search", "x": 10, "y": 20},
                 step_idx=1,
+                after_ui_state={
+                    "screenshot_path": "after.png",
+                    "screen_meta": {"dpi_scale": 1.5},
+                },
+                validator_result={"passed": True, "check_type": "page_changed"},
             )
             final_summary = runner.finalize()
 
             self.assertTrue(step_result.action_result.ok)
+            self.assertEqual(step_result.action_result.before_screenshot["phase"], "before")
+            self.assertEqual(step_result.action_result.after_screenshot["phase"], "after")
+            self.assertEqual(step_result.action_result.screen_meta_snapshot["dpi_scale"], 1.5)
             self.assertEqual(step_result.before_screenshot["phase"], "before")
             self.assertEqual(step_result.after_screenshot["phase"], "after")
             self.assertEqual(capturer.calls, [("before", "run_test", 1), ("after", "run_test", 1)])
@@ -109,9 +118,15 @@ class ExecutorWithRecorderTests(unittest.TestCase):
             actions = read_jsonl(runner.recorder.paths.actions_path)
             results = read_jsonl(runner.recorder.paths.results_path)
             screenshots = read_jsonl(runner.recorder.paths.screenshot_log_path)
+            validators = read_jsonl(runner.recorder.paths.validator_log_path)
+            ui_states = read_jsonl(runner.recorder.paths.ui_state_log_path)
             self.assertEqual(actions[0]["action"]["action_type"], "click")
+            self.assertEqual(actions[0]["step_name"], "open_search")
             self.assertEqual(results[0]["result"]["ok"], True)
+            self.assertEqual(results[0]["result"]["before_screenshot"]["phase"], "before")
             self.assertEqual(screenshots[0]["after"]["phase"], "after")
+            self.assertEqual(validators[0]["validator_result"]["passed"], True)
+            self.assertEqual(ui_states[0]["after_ui_state"]["screenshot_path"], "after.png")
 
     def test_before_screenshot_failure_prevents_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -170,6 +185,101 @@ class ExecutorWithRecorderTests(unittest.TestCase):
             )
 
             self.assertEqual(runner.run_id, "run_existing")
+
+    def test_run_steps_executes_multi_step_action_decision_v2_sequence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backend = FakeDesktopBackend()
+            runner = ExecutorWithRecorder(
+                run_id="run_v2_sequence",
+                task={"goal": "execute B multi-step decisions"},
+                artifact_root=temp_dir,
+                backend=backend,
+                screenshot_capturer=FakeScreenshotCapturer(),
+            )
+            decisions = [
+                ActionDecisionV2.click_candidate(
+                    step_name="open_chat",
+                    target_candidate_id="elem_chat",
+                    x=120,
+                    y=240,
+                    expected_after_state={"target_text": "测试群"},
+                ).to_dict(),
+                ActionDecisionV2.type_text(
+                    step_name="type_message",
+                    target_candidate_id="elem_input",
+                    x=300,
+                    y=500,
+                    text="Hello CUA-Lark",
+                    expected_after_state={"message_text": "Hello CUA-Lark"},
+                ).to_dict(),
+                ActionDecisionV2.press_enter(
+                    step_name="send_message",
+                    expected_after_state={"message_text": "Hello CUA-Lark"},
+                ).to_dict(),
+                ActionDecisionV2.scroll(
+                    step_name="scroll_result_list",
+                    direction="down",
+                    amount=-3,
+                ).to_dict(),
+            ]
+
+            step_results = runner.run_steps(decisions)
+            summary = runner.finalize()
+
+            self.assertEqual([result.step_idx for result in step_results], [1, 2, 3, 4])
+            self.assertTrue(all(result.action_result.ok for result in step_results))
+            self.assertEqual(summary["step_count"], 4)
+            self.assertEqual(summary["success_count"], 4)
+            self.assertEqual(summary["status"], "success")
+            self.assertEqual(
+                backend.calls,
+                [
+                    ("wait", 0.08),
+                    ("click", (120, 240)),
+                    ("click", (300, 500)),
+                    ("wait", 0.08),
+                    ("type_text", ("Hello CUA-Lark", 0.0)),
+                    ("hotkey", ("enter",)),
+                    ("scroll", (-3, None, None)),
+                ],
+            )
+
+            actions = read_jsonl(runner.recorder.paths.actions_path)
+            self.assertEqual([action["step_name"] for action in actions], [
+                "open_chat",
+                "type_message",
+                "send_message",
+                "scroll_result_list",
+            ])
+            self.assertEqual(
+                actions[1]["action"]["expected_after_state"],
+                {"message_text": "Hello CUA-Lark"},
+            )
+
+    def test_module_run_steps_returns_steps_and_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = run_steps(
+                [
+                    ActionDecisionV2.hotkey(
+                        step_name="open_search",
+                        keys=["ctrl", "k"],
+                    ).to_dict(),
+                    ActionDecisionV2.wait(
+                        step_name="wait_search",
+                        seconds=0.1,
+                    ).to_dict(),
+                ],
+                run_id="run_module_steps",
+                artifact_root=temp_dir,
+                backend=FakeDesktopBackend(),
+                screenshot_capturer=FakeScreenshotCapturer(),
+            )
+
+            self.assertEqual(payload["run_id"], "run_module_steps")
+            self.assertEqual(len(payload["steps"]), 2)
+            self.assertEqual(payload["summary"]["status"], "success")
+            self.assertEqual(payload["summary"]["action_stats"]["hotkey"]["count"], 1)
+            self.assertEqual(payload["summary"]["action_stats"]["wait"]["count"], 1)
 
 
 def read_jsonl(path) -> list[dict[str, object]]:

@@ -27,6 +27,7 @@ from executor import (
     execute_action,
     resolve_action_point,
 )
+from planner.action_protocol import ActionDecisionV2
 
 
 class FakeDesktopBackend:
@@ -69,7 +70,34 @@ class BaseExecutorTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.action_type, "click")
+        self.assertEqual(result.planned_click_point, [120, 240])
+        self.assertEqual(result.actual_click_point, [120, 240])
+        self.assertEqual(result.click_offset, [0, 0])
         self.assertEqual(backend.calls, [("wait", 0.05), ("click", (120, 240))])
+
+    def test_full_action_decision_v2_click_is_executed_with_diagnostics(self):
+        backend = FakeDesktopBackend()
+        executor = BaseExecutor(backend=backend)
+        decision = ActionDecisionV2.click_candidate(
+            step_name="open_search",
+            target_candidate_id="elem_search",
+            x=120,
+            y=240,
+            reason="open search box",
+            retry_count=1,
+            expected_after_state={"search_active": True},
+        )
+
+        result = executor.execute_action(decision.to_dict())
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action_type, "click")
+        self.assertEqual(result.target_candidate_id, "elem_search")
+        self.assertEqual(result.planned_click_point, [120, 240])
+        self.assertEqual(result.actual_click_point, [120, 240])
+        self.assertEqual(result.click_offset, [0, 0])
+        self.assertEqual(result.executor_message, "executed click")
+        self.assertEqual(backend.calls, [("wait", 0.08), ("click", (120, 240))])
 
     def test_double_click_resolves_target_candidate_center(self):
         backend = FakeDesktopBackend()
@@ -115,10 +143,18 @@ class BaseExecutorTests(unittest.TestCase):
         )
 
         result = executor.execute_action(
-            {"action_type": "type", "text": "Hello World", "center": [10, 20]}
+            {
+                "action_type": "type",
+                "text": "Hello World",
+                "target_candidate_id": "elem_input",
+                "center": [10, 20],
+            }
         )
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.target_candidate_id, "elem_input")
+        self.assertEqual(result.planned_click_point, [10, 20])
+        self.assertEqual(result.actual_click_point, [10, 20])
         self.assertEqual(
             backend.calls,
             [
@@ -140,6 +176,18 @@ class BaseExecutorTests(unittest.TestCase):
         self.assertTrue(hotkey_result.ok)
         self.assertTrue(wait_result.ok)
         self.assertEqual(backend.calls, [("hotkey", ("alt", "left")), ("wait", 0.25)])
+
+    def test_action_decision_v2_press_enter_uses_hotkey_enter(self):
+        backend = FakeDesktopBackend()
+        executor = BaseExecutor(backend=backend)
+
+        result = executor.execute_action(
+            ActionDecisionV2.press_enter(step_name="send_message").to_dict()
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action_type, "hotkey")
+        self.assertEqual(backend.calls, [("hotkey", ("enter",))])
 
     def test_hotkey_can_focus_point_before_dispatch(self):
         backend = FakeDesktopBackend()
@@ -206,6 +254,9 @@ class BaseExecutorTests(unittest.TestCase):
         self.assertFalse(backend_failure.ok)
         self.assertEqual(backend_failure.action_type, "click")
         self.assertEqual(backend_failure.error, "desktop refused click")
+        self.assertEqual(backend_failure.error_type, "RuntimeError")
+        self.assertEqual(backend_failure.planned_click_point, [1, 2])
+        self.assertIsNone(backend_failure.actual_click_point)
 
     def test_resolve_action_point_accepts_direct_center(self):
         self.assertEqual(resolve_action_point({"center": [3, 4]}), (3, 4))

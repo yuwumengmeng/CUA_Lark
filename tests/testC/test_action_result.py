@@ -32,15 +32,49 @@ class ActionResultTests(unittest.TestCase):
         self.assertEqual(
             result.to_dict(),
             {
-                "version": "action_result.v1",
+                "version": "action_result.v2",
                 "ok": True,
+                "action_status": "success",
                 "action_type": "click",
+                "target_candidate_id": None,
+                "planned_click_point": None,
+                "actual_click_point": None,
+                "click_offset": None,
                 "start_ts": "2026-04-24T10:00:00.000Z",
                 "end_ts": "2026-04-24T10:00:00.125Z",
                 "error": None,
+                "error_type": None,
+                "warning": None,
                 "duration_ms": 125,
+                "before_screenshot": None,
+                "after_screenshot": None,
+                "screen_meta_snapshot": None,
+                "executor_message": "",
             },
         )
+
+    def test_v2_diagnostic_fields_are_serialized(self):
+        result = ActionResult.success(
+            action_type="click",
+            start_ts="2026-04-24T10:00:00.000Z",
+            end_ts="2026-04-24T10:00:00.125Z",
+            target_candidate_id="elem_001",
+            planned_click_point=[100, 200],
+            actual_click_point=[101, 198],
+            before_screenshot={"screenshot_path": "before.png"},
+            after_screenshot="after.png",
+            screen_meta_snapshot={"dpi_scale": 1.5},
+            executor_message="clicked candidate center",
+        )
+
+        payload = result.to_dict()
+
+        self.assertEqual(payload["click_offset"], [1, -2])
+        self.assertEqual(payload["target_candidate_id"], "elem_001")
+        self.assertEqual(payload["before_screenshot"]["screenshot_path"], "before.png")
+        self.assertEqual(payload["after_screenshot"], {"path": "after.png"})
+        self.assertEqual(payload["screen_meta_snapshot"]["dpi_scale"], 1.5)
+        self.assertEqual(payload["executor_message"], "clicked candidate center")
 
     def test_failure_result_roundtrip(self):
         result = action_result_from_exception(
@@ -52,8 +86,10 @@ class ActionResultTests(unittest.TestCase):
         restored = ActionResult.from_dict(result.to_dict())
 
         self.assertFalse(restored.ok)
+        self.assertEqual(restored.action_status, "failed")
         self.assertEqual(restored.action_type, "drag")
         self.assertEqual(restored.error, "unsupported action_type: drag")
+        self.assertEqual(restored.error_type, "ValueError")
         self.assertEqual(restored.duration_ms, 50)
 
     def test_invalid_result_data_is_rejected(self):

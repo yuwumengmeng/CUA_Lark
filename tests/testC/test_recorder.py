@@ -53,14 +53,18 @@ class RunRecorderTests(unittest.TestCase):
 
             recorder.record_step(
                 step_idx=1,
-                action_decision={"action_type": "click", "x": 10, "y": 20},
+                action_decision={"action_type": "click", "step_name": "open_search", "x": 10, "y": 20},
                 action_result=ActionResult.success(
                     action_type="click",
                     start_ts="2026-04-24T10:00:00.000Z",
                     end_ts="2026-04-24T10:00:00.100Z",
+                    planned_click_point=[10, 20],
+                    actual_click_point=[11, 20],
                 ),
                 before_screenshot=FakeScreenshot("before.png", "before"),
                 after_screenshot=FakeScreenshot("after.png", "after"),
+                after_ui_state={"screenshot_path": "after.png", "candidates": []},
+                validator_result={"passed": True, "check_type": "page_changed"},
             )
             summary = recorder.record_step(
                 step_idx=2,
@@ -76,21 +80,41 @@ class RunRecorderTests(unittest.TestCase):
             self.assertEqual(summary["step_count"], 2)
             self.assertEqual(summary["success_count"], 1)
             self.assertEqual(summary["failure_count"], 1)
+            self.assertEqual(summary["success_rate"], 0.5)
+            self.assertEqual(summary["avg_step_duration_ms"], 75)
             self.assertEqual(
                 summary["action_stats"]["click"],
-                {"count": 2, "failure_count": 1, "avg_duration_ms": 75},
+                {
+                    "count": 2,
+                    "failure_count": 1,
+                    "avg_duration_ms": 75,
+                    "avg_abs_click_offset_x": 1,
+                    "avg_abs_click_offset_y": 0,
+                },
             )
+            self.assertEqual(summary["validator_count"], 1)
+            self.assertEqual(summary["validator_failure_count"], 0)
 
             action_lines = read_jsonl(recorder.paths.actions_path)
             result_lines = read_jsonl(recorder.paths.results_path)
             screenshot_lines = read_jsonl(recorder.paths.screenshot_log_path)
+            validator_lines = read_jsonl(recorder.paths.validator_log_path)
+            ui_state_lines = read_jsonl(recorder.paths.ui_state_log_path)
             saved_summary = json.loads(recorder.paths.summary_path.read_text(encoding="utf-8"))
 
             self.assertEqual(len(action_lines), 2)
+            self.assertEqual(action_lines[0]["step_name"], "open_search")
             self.assertEqual(action_lines[0]["action"]["x"], 10)
+            self.assertEqual(action_lines[0]["executed_action"]["x"], 10)
             self.assertEqual(result_lines[1]["result"]["error"], "target_not_found")
             self.assertEqual(screenshot_lines[0]["before"]["phase"], "before")
+            self.assertEqual(validator_lines[0]["validator_result"]["passed"], True)
+            self.assertEqual(ui_state_lines[0]["after_ui_state"]["screenshot_path"], "after.png")
             self.assertEqual(saved_summary["artifact_paths"]["summary_path"], str(recorder.paths.summary_path))
+            self.assertEqual(
+                saved_summary["artifact_paths"]["validator_log_path"],
+                str(recorder.paths.validator_log_path),
+            )
 
     def test_finalize_marks_success_or_failed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
